@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Мини-игра: человечки + чат</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+  body { font-family: system-ui, sans-serif; background: #1a1a2e; color: #fff; height: 100vh; overflow: hidden; display: flex; flex-direction: column; }
+  #map { flex: 1; position: relative; background: #16213e; overflow: hidden; touch-action: none; }
+  .player { position: absolute; width: 22px; height: 22px; border-radius: 50%; transform: translate(-50%, -50%); border: 2px solid #fff; transition: left .08s linear, top .08s linear; }
+  .player.me { border-color: #ffd700; box-shadow: 0 0 10px #ffd700; z-index: 2; }
+  .player .name { position: absolute; top: -18px; left: 50%; transform: translateX(-50%); font-size: 10px; white-space: nowrap; color: #ccc; }
+  #chat { height: 140px; display: flex; flex-direction: column; background: #0f1626; border-top: 1px solid #333; }
+  #chatlog { flex: 1; overflow-y: auto; padding: 6px 10px; font-size: 13px; }
+  #chatlog div { margin: 2px 0; }
+  #chatlog .me { color: #ffd700; }
+  #chatinput { display: flex; border-top: 1px solid #333; }
+  #chatinput input { flex: 1; padding: 10px; border: none; background: #16213e; color: #fff; font-size: 14px; outline: none; }
+  #chatinput button { padding: 10px 16px; border: none; background: #4361ee; color: #fff; font-weight: bold; }
+  #joystick { position: absolute; bottom: 20px; left: 20px; width: 110px; height: 110px; border-radius: 50%; background: rgba(255,255,255,.08); border: 2px solid rgba(255,255,255,.2); display: none; touch-action: none; }
+  #stick { position: absolute; width: 50px; height: 50px; border-radius: 50%; background: rgba(255,255,255,.35); left: 30px; top: 30px; pointer-events: none; }
+  #status { position: absolute; top: 8px; right: 10px; font-size: 11px; color: #888; }
+  @media (pointer: coarse) { #joystick { display: block; } }
+</style>
+</head>
+<body>
+
+<div id="map">
+  <div id="status">подключение...</div>
+  <div id="joystick"><div id="stick"></div></div>
+</div>
+
+<div id="chat">
+  <div id="chatlog"></div>
+  <div id="chatinput">
+    <input id="msg" placeholder="Написать сообщение..." maxlength="100">
+    <button id="send">➤</button>
+  </div>
+</div>
+
+<script>
+// ===== АДРЕС СЕРВЕРА (уже вставлен) =====
+const WS_URL = 'wss://sandbank-economic-zeppelin.ngrok-free.dev';
+
+const MAP_W = 600, MAP_H = 600;
+const SPEED = 3;
+
+const map = document.getElementById('map');
+const statusEl = document.getElementById('status');
+const chatlog = document.getElementById('chatlog');
+const msgInput = document.getElementById('msg');
+const sendBtn = document.getElementById('send');
+
+let ws = null;
+let myId = null;
+let players = {};
+let myPos = { x: MAP_W / 2, y: MAP_H / 2 };
+const keys = {};
+let joyDir = { x: 0, y: 0 };
+
+function connect() {
+  ws = new WebSocket(WS_URL);
+  ws.onopen = () => { statusEl.textContent = '🟢 онлайн'; };
+  ws.onclose = () => {
+    statusEl.textContent = '🔴 соединение закрыто';
+    setTimeout(connect, 2000);
+  };
+  ws.onmessage = (e) => {
+    const msg = JSON.parse(e.data);
+    if (msg.type === 'init') {
+      myId = msg.id;
+      players = msg.players;
+      if (players[myId]) myPos = { x: players[myId].x, y: players[myId].y };
+      render();
+    }
+    if (msg.type === 'players') {
+      players = msg.players;
+      if (players[myId]) myPos = { x: players[myId].x, y: players[myId].y };
+      render();
+    }
+    if (msg.type === 'chat') {
+      const div = document.createElement('div');
+      if (msg.id === myId) div.className = 'me';
+      div.textContent = `${msg.name}: ${msg.text}`;
+      chatlog.appendChild(div);
+      chatlog.scrollTop = chatlog.scrollHeight;
+    }
+  };
+}
+
+function sendMove() {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: 'move', x: myPos.x, y: myPos.y }));
+  }
+}
+
+window.addEventListener('keydown', (e) => {
+  keys[e.key.toLowerCase()] = true;
+  if (e.key === 'Enter' && document.activeElement !== msgInput) msgInput.focus();
+});
+window.addEventListener('keyup', (e) => { keys[e.key.toLowerCase()] = false; });
+
+const joystick = document.getElementById('joystick');
+const stick = document.getElementById('stick');
+let joyActive = false;
+
+joystick.addEventListener('touchstart', (e) => { e.preventDefault(); joyActive = true; updateJoy(e.touches[0]); });
+joystick.addEventListener('touchmove', (e) => { e.preventDefault(); if (joyActive) updateJoy(e.touches[0]); });
+joystick.addEventListener('touchend', (e) => {
+  e.preventDefault(); joyActive = false; joyDir = { x: 0, y: 0 };
+  stick.style.left = '30px'; stick.style.top = '30px';
+});
+
+function updateJoy(touch) {
+  const rect = joystick.getBoundingClientRect();
+  const cx = rect.left + rect.width / 2;
+  const cy = rect.top + rect.height / 2;
+  let dx = touch.clientX - cx;
+  let dy = touch.clientY - cy;
+  const max = rect.width / 2 - 10;
+  const dist = Math.hypot(dx, dy);
+  if (dist > max) { dx = dx / dist * max; dy = dy / dist * max; }
+  stick.style.left = (rect.width / 2 - 25 + dx) + 'px';
+  stick.style.top = (rect.height / 2 - 25 + dy) + 'px';
+  joyDir.x = dx / max;
+  joyDir.y = dy / max;
+}
+
+sendBtn.onclick = sendChat;
+msgInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') sendChat();
+  e.stopPropagation();
+});
+function sendChat() {
+  const text = msgInput.value.trim();
+  if (!text || !ws || ws.readyState !== WebSocket.OPEN) return;
+  ws.send(JSON.stringify({ type: 'chat', text }));
+  msgInput.value = '';
+}
+
+function loop() {
+  let dx = 0, dy = 0;
+  if (keys['w'] || keys['arrowup']) dy -= 1;
+  if (keys['s'] || keys['arrowdown']) dy += 1;
+  if (keys['a'] || keys['arrowleft']) dx -= 1;
+  if (keys['d'] || keys['arrowright']) dx += 1;
+  dx += joyDir.x;
+  dy += joyDir.y;
+
+  const len = Math.hypot(dx, dy);
+  if (len > 0) {
+    dx = dx / len * SPEED;
+    dy = dy / len * SPEED;
+    myPos.x = Math.max(10, Math.min(MAP_W - 10, myPos.x + dx));
+    myPos.y = Math.max(10, Math.min(MAP_H - 10, myPos.y + dy));
+    if (players[myId]) { players[myId].x = myPos.x; players[myId].y = myPos.y; }
+    render();
+    throttleSend();
+  }
+  requestAnimationFrame(loop);
+}
+
+let lastSend = 0;
+function throttleSend() {
+  const now = Date.now();
+  if (now - lastSend > 66) { lastSend = now; sendMove(); }
+}
+
+function render() {
+  const viewW = map.clientWidth;
+  const viewH = map.clientHeight;
+  const camX = Math.max(0, Math.min(MAP_W - viewW, myPos.x - viewW / 2));
+  const camY = Math.max(0, Math.min(MAP_H - viewH, myPos.y - viewH / 2));
+
+  for (const id in players) {
+    let el = document.getElementById('p' + id);
+    if (!el) {
+      el = document.createElement('div');
+      el.className = 'player' + (Number(id) === myId ? ' me' : '');
+      el.id = 'p' + id;
+      el.style.background = players[id].color;
+      const nameEl = document.createElement('div');
+      nameEl.className = 'name';
+      nameEl.textContent = players[id].name;
+      el.appendChild(nameEl);
+      map.appendChild(el);
+    }
+    const p = players[id];
+    el.style.left = (p.x - camX) + 'px';
+    el.style.top = (p.y - camY) + 'px';
+  }
+
+  document.querySelectorAll('.player').forEach((el) => {
+    const id = el.id.slice(1);
+    if (!players[id]) el.remove();
+  });
+}
+
+connect();
+loop();
+window.addEventListener('resize', render);
+</script>
+</body>
+</html>
